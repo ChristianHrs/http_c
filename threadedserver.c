@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,34 +143,106 @@ void HEADER_VALUE_STATE(char **ptr_ptr_http_client_buffer,
     }
 }
 
-void send_requested_file_back(int new_connection_fd, char *ptr_uri) {
-    // TODO: get the file type, and depending on the file type construct a
-    // corresponding http response packet that can be sent back to the
-    // user...going to just focus on text files right now
-    char text_file_contents[1024];
-    char ch;
-    FILE *file_ptr = fopen(ptr_uri, "r");
-    int counter = 0;
-    char *ptr_packet_buffer = malloc(BUFFER_SIZE);
-    int text_file_contents_len;
+size_t get_size_of_file(FILE *fp) {
+    fseek(fp, 0, SEEK_END);
+    size_t size_of_file = ftell(fp);
+    // reset file pointer to point back to beginning of the file
+    fseek(fp, 0, SEEK_SET);
+    return size_of_file;
+}
 
-    while ((ch = fgetc(file_ptr)) != EOF) {
-        text_file_contents[counter] = ch;
-        counter += 1;
+void send_requested_file_back(int new_connection_fd, char *ptr_uri) {
+
+    // TODO: get .jpg and .jpeg file transfers to work -> also detect type of
+    // file and send the file correspondingly (depending on type)
+
+    FILE *file_ptr;
+
+    // get file type
+    char file_type[8];
+    int counter = 0;
+    bool past_period = false;
+    for (int i = 0; i < strlen(ptr_uri); i++) {
+
+        if (ptr_uri[i] == '.') {
+            past_period = true;
+            i += 1;
+        }
+
+        if (past_period && ptr_uri[i] != '\0') {
+            file_type[counter] = ptr_uri[i];
+            counter += 1;
+        }
     }
 
-    fclose(file_ptr);
+    file_type[counter] = '\0';
+    printf("\nFile Type: %s", file_type);
 
-    text_file_contents_len = strlen(text_file_contents);
-    // format http response, will be stored in packet_buffer
-    snprintf(ptr_packet_buffer, BUFFER_SIZE,
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Length: %d\r\n"
-             "Content-Type: text/plain;\r\n\r\n"
-             "%s",
-             text_file_contents_len, text_file_contents);
+    if (strcmp(file_type, "txt") == 0) {
 
-    send_http_response(new_connection_fd, ptr_packet_buffer);
+        file_ptr = fopen(ptr_uri, "r");
+        size_t size = get_size_of_file(file_ptr);
+
+        char ch;
+        char text_file_contents[size];
+        char *ptr_packet_buffer = malloc(BUFFER_SIZE + size);
+        counter = 0;
+        size_t text_file_contents_len;
+
+        if (file_ptr == NULL) {
+            fprintf(stderr, "\t Can't open file : %s", ptr_uri);
+            fclose(file_ptr);
+            exit(-1);
+            return;
+        }
+
+        while ((ch = fgetc(file_ptr)) != EOF) {
+            text_file_contents[counter] = ch;
+            counter += 1;
+        }
+
+        printf("\nsize of file: %ld", size);
+
+        fclose(file_ptr);
+
+        text_file_contents_len = strlen(text_file_contents);
+        // format http response, will be stored in packet_buffer
+        snprintf(ptr_packet_buffer, BUFFER_SIZE,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Length: %ld\r\n"
+                 "Content-Type: text/plain;\r\n\r\n"
+                 "%s",
+                 text_file_contents_len, text_file_contents);
+        send_http_response(new_connection_fd, ptr_packet_buffer);
+        return;
+    } else if (strcmp(file_type, "jpg") == 0) {
+        file_ptr = fopen(ptr_uri, "rb");
+
+        if (file_ptr == NULL) {
+            fprintf(stderr, "\t Can't open file : %s", ptr_uri);
+            fclose(file_ptr);
+            exit(-1);
+            return;
+        }
+
+        size_t size = get_size_of_file(file_ptr);
+        unsigned char img_file_contents[size];
+        size_t bytes_read =
+            fread(img_file_contents, sizeof(unsigned char), size, file_ptr);
+
+        printf("\nsize of file: %ld\n", size);
+        printf("\nbytes read: %ld\n", bytes_read);
+
+        fclose(file_ptr);
+        char *ptr_packet_buffer = malloc(BUFFER_SIZE + size);
+        snprintf(ptr_packet_buffer, BUFFER_SIZE + size,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Length: %ld\r\n"
+                 "Content-Type: image/jpeg;\r\n\r\n",
+                 size);
+        send_http_response(new_connection_fd, ptr_packet_buffer);
+        send(new_connection_fd, img_file_contents, size, 0);
+    }
     return;
 }
 
