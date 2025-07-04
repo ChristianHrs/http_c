@@ -1,4 +1,5 @@
 #include "http.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,8 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BACKLOG 50
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
 
 char *receive_HTTP_request(int new_connection_fd) {
     char *ptr_http_request_buffer = malloc(BUFFER_SIZE + 1);
@@ -66,7 +66,7 @@ void ERROR_STATE_400(int new_connection_fd) {
     snprintf(ptr_packet_buffer, BUFFER_SIZE,
              "HTTP/1.1 400 Bad Request\r\n"
              "Content-Length: %d\r\n"
-             "Content-Type: text/html;\r\n\r\n"
+             "Content-Type: text/html;\r\nConnection: close\r\n\r\n"
              "%s",
              body_len, ptr_body);
     send_http_response(new_connection_fd, ptr_packet_buffer);
@@ -84,7 +84,7 @@ void ERROR_STATE_404(int new_connection_fd) {
     snprintf(ptr_packet_buffer, BUFFER_SIZE,
              "HTTP/1.1 404 Not Found\r\n"
              "Content-Length: %ld\r\n"
-             "Content-Type: text/html;\r\n\r\n"
+             "Content-Type: text/html;\r\nConnection: close\r\n\r\n"
              "%s",
              body_len, ptr_body);
     send_http_response(new_connection_fd, ptr_packet_buffer);
@@ -97,20 +97,21 @@ void HEADER_VALUE_STATE(char **ptr_ptr_http_client_buffer,
     bool single_crlf_found = false;
     char *buffer = *ptr_ptr_http_client_buffer;
     char header_value[256];
-    int counter = 0;
-    int j = 0;
+    size_t counter = 0;
+    size_t j = 0;
+    size_t buffer_len = strlen(buffer);
 
     // this for loop is used to skip redundant characters
-    for (int i = 0; i < strlen(buffer); i++) {
+    for (size_t i = 0; i < buffer_len; i++) {
         if (buffer[i] == ':' || buffer[i] == ' ' || buffer[i] == '\r' ||
             buffer[i] == '\n') {
             j += 1;
         } else {
-            i = strlen(buffer);
+            i = buffer_len;
         }
     }
 
-    for (j = j; j < strlen(buffer); j++) {
+    for (NULL; j < buffer_len; j++) {
         if (!(buffer[j] == '\r' || buffer[j] == '\n') && !header_value_found) {
             header_value[counter] = buffer[j];
             counter += 1;
@@ -119,7 +120,7 @@ void HEADER_VALUE_STATE(char **ptr_ptr_http_client_buffer,
             header_value_found = true;
         }
 
-        if (j < (strlen(buffer) - 1)) {
+        if (j < (buffer_len - 1)) {
             if (buffer[j] == '\r' && buffer[j + 1] == '\n' &&
                 !single_crlf_found) {
                 single_crlf_found = true;
@@ -151,9 +152,10 @@ size_t get_size_of_file(FILE *fp) {
 char *get_file_type_from_uri(char *ptr_uri_buffer) {
     // get file type
     char *file_type = malloc(sizeof(char) * 64);
-    int counter = 0;
+    size_t counter = 0;
     bool past_period = false;
-    for (int i = 0; i < strlen(ptr_uri_buffer); i++) {
+    size_t buffer_len = strlen(ptr_uri_buffer);
+    for (size_t i = 0; i < buffer_len; i++) {
 
         if (ptr_uri_buffer[i] == '.') {
             past_period = true;
@@ -180,20 +182,21 @@ void send_requested_file_back(int new_connection_fd, char *ptr_uri_buffer) {
         strcmp(file_type, "js") == 0 || strcmp(file_type, "xml") == 0) {
 
         file_ptr = fopen(ptr_uri_buffer, "r");
-        size_t size = get_size_of_file(file_ptr);
-
-        char ch;
-        char *ptr_file_contents = malloc(sizeof(char) * size);
-        char *ptr_packet_buffer = malloc(BUFFER_SIZE + size);
-        counter = 0;
-        size_t file_contents_len;
 
         if (file_ptr == NULL) {
             close(new_connection_fd);
             perror("Can't open file.");
-            exit(-1);
+            exit(0);
             return;
         }
+
+        size_t size = get_size_of_file(file_ptr);
+
+        char ch;
+        char *ptr_file_contents = malloc(sizeof(char) * (size + 1));
+        char *ptr_packet_buffer = malloc(BUFFER_SIZE + (size + 1));
+        counter = 0;
+        size_t file_contents_len;
 
         while ((ch = fgetc(file_ptr)) != EOF) {
             ptr_file_contents[counter] = ch;
@@ -208,8 +211,9 @@ void send_requested_file_back(int new_connection_fd, char *ptr_uri_buffer) {
 
         file_contents_len = strlen(ptr_file_contents);
 
-        char HTTP_format[] = "HTTP/1.1 200 OK\r\nContent-Length: "
-                             "%ld\r\nContent-Type: %s;\r\n\r\n%s";
+        char HTTP_format[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: "
+            "%ld\r\nContent-Type: %s\r\nConnection: close\r\n\r\n%s";
         // format http response, will be stored in packet_buffer
         if (strcmp(file_type, "txt") == 0) {
             snprintf(ptr_packet_buffer, BUFFER_SIZE, HTTP_format,
@@ -244,7 +248,7 @@ void send_requested_file_back(int new_connection_fd, char *ptr_uri_buffer) {
         if (file_ptr == NULL) {
             fprintf(stderr, "\t Can't open file : %s", ptr_uri_buffer);
             close(new_connection_fd);
-            exit(-1);
+            exit(0);
             return;
         }
 
@@ -252,13 +256,13 @@ void send_requested_file_back(int new_connection_fd, char *ptr_uri_buffer) {
         // unsigned char img_file_contents[size];
         unsigned char *ptr_img_file_contents =
             malloc(sizeof(unsigned char) * size);
-        size_t bytes_read =
-            fread(ptr_img_file_contents, sizeof(unsigned char), size, file_ptr);
+        fread(ptr_img_file_contents, sizeof(unsigned char), size, file_ptr);
 
         // printf("\nsize of file: %ld\n", size);
         // printf("\nbytes read: %ld\n", bytes_read);
-        char HTTP_format[] = "HTTP/1.1 200 OK\r\nContent-Length: "
-                             "%ld\r\nContent-Type: %s;\r\n\r\n";
+        char HTTP_format[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: "
+            "%ld\r\nContent-Type: %s\r\nConnection: close\r\n\r\n";
         char *ptr_packet_buffer = malloc(BUFFER_SIZE + size);
         if (strcmp(file_type, "jpg") == 0) {
             snprintf(ptr_packet_buffer, BUFFER_SIZE + size, HTTP_format, size,
@@ -296,13 +300,12 @@ char *format_date(char *str, time_t val) {
 }
 
 void send_requested_HEAD_back(int new_connection_fd, char *ptr_uri_buffer) {
-    FILE *file_ptr;
     struct stat file_stat;
-    struct tm *timeinfo = localtime(&file_stat.st_atime);
     char *file_type = get_file_type_from_uri(ptr_uri_buffer);
 
     if (strcmp(ptr_uri_buffer, "/") == 0) {
-        char HTTP_format[] = "HTTP/1.1 200 OK\r\nContent-Type: %s;\r\n\r\n";
+        char HTTP_format[] =
+            "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nConnection: close\r\n\r\n";
         char *ptr_packet_buffer = malloc(BUFFER_SIZE);
         snprintf(ptr_packet_buffer, BUFFER_SIZE, HTTP_format, "text/plain");
         send_http_response(new_connection_fd, ptr_packet_buffer);
@@ -347,6 +350,7 @@ void send_requested_HEAD_back(int new_connection_fd, char *ptr_uri_buffer) {
         } else if (strcmp(file_type, "ico") == 0) {
             data_type = "image/x-icon";
         } else {
+            data_type = NULL;
             ERROR_STATE_404(new_connection_fd);
         }
 
@@ -361,17 +365,25 @@ void send_requested_HEAD_back(int new_connection_fd, char *ptr_uri_buffer) {
 void END_OF_HEADERS_STATE(int new_connection_fd, char *ptr_uri,
                           char *ptr_method) {
 
-    // printf("\nEnd of headers state reached.");
+    // TODO: fix this memory bug here...
+
     char *processed_uri_ptr = ptr_uri;
     if (!(strcmp(ptr_uri, "/") == 0)) {
         processed_uri_ptr += 1;
     }
-    char uri_buffer[strlen(processed_uri_ptr)];
-    strcpy(uri_buffer, processed_uri_ptr);
+    // size_t processed_len = strlen(processed_uri_ptr);
+    // char uri_buffer[processed_len + 1];
+    char *uri_buffer = strdup(processed_uri_ptr);
+    strcpy(uri_buffer, processed_uri_ptr); // error is here
     char *ptr_uri_buffer = uri_buffer;
-    //
     FILE *file_ptr = fopen(uri_buffer, "r");
-    size_t len_uri = strlen(uri_buffer);
+
+    if (file_ptr == NULL) {
+        close(new_connection_fd);
+        perror("Can't open file.");
+        exit(0);
+        return;
+    }
 
     struct stat sb;
     stat(uri_buffer, &sb);
@@ -380,6 +392,7 @@ void END_OF_HEADERS_STATE(int new_connection_fd, char *ptr_uri,
     if (access(uri_buffer, F_OK) == 0 && !S_ISDIR(sb.st_mode) &&
         strcmp(ptr_method, "GET") == 0) {
         send_requested_file_back(new_connection_fd, ptr_uri_buffer);
+        free(uri_buffer);
         free(ptr_uri);
         free(ptr_method);
         fclose(file_ptr);
@@ -388,12 +401,14 @@ void END_OF_HEADERS_STATE(int new_connection_fd, char *ptr_uri,
                access(uri_buffer, F_OK) == 0 && !S_ISDIR(sb.st_mode)) {
         // printf("\nhead request");
         send_requested_HEAD_back(new_connection_fd, ptr_uri_buffer);
+        free(uri_buffer);
         free(ptr_uri);
         free(ptr_method);
         return;
     } else {
         // printf("\nFile does not exist!");
         ERROR_STATE_404(new_connection_fd);
+        free(uri_buffer);
         free(ptr_uri);
         free(ptr_method);
         return;
@@ -408,16 +423,16 @@ void HEADER_NAME_STATE(char **ptr_ptr_http_client_buffer, int new_connection_fd,
     char header_name[256];
     bool colon_found = false;
     bool single_crlf_found = false;
-    int buffer_len = strlen(buffer);
-    int counter = 0;
+    size_t counter = 0;
+    size_t buffer_len = strlen(buffer);
 
     // printf("\n size of buffer: %d", buffer_len);
     // extract the header name from the header field
-    for (int i = 0; i < strlen(buffer); i++) {
+    for (size_t i = 0; i < buffer_len; i++) {
         if (buffer[i] == ':') {
             colon_found = true;
             *ptr_ptr_http_client_buffer = &buffer[i];
-            i = strlen(buffer);
+            i = buffer_len;
         }
 
         if (!single_crlf_found) {
@@ -427,7 +442,7 @@ void HEADER_NAME_STATE(char **ptr_ptr_http_client_buffer, int new_connection_fd,
             header_name[counter] = '\0';
         }
 
-        if (strlen(buffer) == 2 && buffer[i] == '\r' && buffer[i + 1] == '\n') {
+        if (buffer_len == 2 && buffer[i] == '\r' && buffer[i + 1] == '\n') {
             // printf("\ncrlf found at header name state!");
             single_crlf_found = true;
         }
@@ -464,7 +479,6 @@ void REQUEST_LINE_STATE(char **ptr_ptr_http_client_buffer,
     char *ptr_method = malloc(sizeof(char) * 8);
     char *ptr_uri = malloc(sizeof(char) * 1025);
     char http_version[16];
-    bool valid_spacing = false;
     bool host_header_present = false;
     int result = sscanf(buffer, "%s %s %s", ptr_method, ptr_uri, http_version);
 
@@ -505,8 +519,8 @@ void REQUEST_LINE_STATE(char **ptr_ptr_http_client_buffer,
         return;
     }
 
-    int len_method = strlen(ptr_method);
-    int len_uri = strlen(ptr_uri);
+    size_t len_method = strlen(ptr_method);
+    size_t len_uri = strlen(ptr_uri);
     ptr_uri[len_uri] = '\0';
     ptr_method[len_method] = '\0';
 
@@ -541,30 +555,12 @@ void parse_HTTP_requests(int new_connection_fd) {
     char *ptr_http_client_buffer = receive_HTTP_request(new_connection_fd);
     if (ptr_http_client_buffer == NULL) {
         free(ptr_http_client_buffer);
+        close(new_connection_fd);
         return;
     }
-    // required as strtok modifies the original ptr data
-    // char *dupe_ptr_http_client = malloc(strlen(ptr_http_client_buffer) +
-    // 1); memcpy(dupe_ptr_http_client, ptr_http_client_buffer,
-    //        strlen(ptr_http_client_buffer) + 1);
-    // char *token = strtok(dupe_ptr_http_client, "\r\n");
-    //
-    // printf("\nHTTP Packet received from browser/client:\n");
-    // int status_line_found = 0;
-    // char *ptr_status_line;
-    // while (token != NULL) {
-    //     printf("%s\n", token);
-    //     if (status_line_found == 0) {
-    //         ptr_status_line = token;
-    //         status_line_found = 1;
-    //     }
-    //     token = strtok(NULL, "\r\n"); // split string by delimitter CRLF
-    // }
-    // printf("\n");
 
     STATE_PARSER(ptr_http_client_buffer, new_connection_fd);
 
     free(ptr_http_client_buffer);
-    // free(dupe_ptr_http_client);
     return;
 }
