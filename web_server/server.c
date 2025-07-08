@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -10,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "../threaded_server_src/http.h"
 
 #define MYPORT "8080"
 #define BACKLOG 10
@@ -20,11 +20,15 @@ void error(const char *msg) {
     exit(0);
 }
 
-void send_http_response(int sock, char *body) {
+char *ws_sha1_hash(char *key) {
+    return NULL;
+}
+
+// TODO: Send http response need to be websocket format
+void ws_send_http_response(int sock, char *body) {
     char response[BUFFER_SIZE];
     int body_len = strlen(body) + 15; // Add 15 to account for the dict format
 
-    // TODO: make into json by formatting the body properly
     snprintf(response, sizeof(response),
          "HTTP/1.1 200 OK\r\n"
          "Content-Type: application/json\r\n"
@@ -35,6 +39,49 @@ void send_http_response(int sock, char *body) {
          "{\"message\": \"%s\"}",
          body_len, body);
     write(sock, response, strlen(response));
+}
+
+void ws_send_websocket_response(int sock, char *body) {
+    char response[BUFFER_SIZE];
+    // FIX: Not sure if I still need this
+    int body_len = strlen(body) + 15; // Add 15 to account for the dict format
+
+    snprintf(response, sizeof(response),
+         "HTTP/1.1 101 Switching Protocols\r\n"
+         "Upgrage: websocket\r\n"
+         "Connection: Upgrade\r\n"
+         "Sec-WebSocket-Accept: [calced Base64 str]\r\n\r\n" // TODO: CALCULATE
+    );
+    write(sock, response, strlen(response));
+}
+
+char *ws_parse_websocket_http(const char *http_header) {
+    printf("Full Header: \n%s\n", http_header);
+    const char *needle = "Sec-WebSocket-Key:";
+    char *line = strtok(strdup(http_header), "\r\n");
+
+    while (line != NULL) {
+        if (strncmp(line, needle, strlen(needle)) == 0) {
+            const char *value_start = line + strlen(needle);
+            while (*value_start == ' ') value_start++;
+
+            char *result = malloc(strlen(value_start) + 37); // Magic str to append will be 36 bytes
+            if (!result) return NULL;
+            strcpy(result, value_start);
+            printf("Key found: %s\n", result);
+            // return result;
+        }
+        line = strtok(NULL, "\n\r");
+    }
+
+    // TODO: Calc the server's acceptance key
+    // - append the magic string
+    // - Compute the SHA1 hash
+    // - Base64 encode
+    char *magic_str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    strcat(magic_str, result);
+    // The above might be a retarded way of doing things
+    const char acceptance_key = ws_sha1_hash(result);
 }
 
 int main(int argc, char *argv[]) {
@@ -93,7 +140,7 @@ int main(int argc, char *argv[]) {
             if (fd_count >= BACKLOG + 1) {
                 printf("Connection to full server attempted\n");
                 char *msg = "Server full";
-                send_http_response(client_sockfd, msg);
+                ws_send_http_response(client_sockfd, msg);
                 close(client_sockfd);
             } else {
                 printf("%d successfully connected to the server\n", client_sockfd);
@@ -102,9 +149,8 @@ int main(int argc, char *argv[]) {
                 pfds[fd_count].events = POLLIN;
                 fd_count += 1;
 
-                char *msg = "Connected to the server";
-                send_http_response(client_sockfd, msg);
-                printf("SENT MSG TO THE CLIENT\n");
+                // char *msg = "Connected to the server";
+                // ws_send_http_response(client_sockfd, msg);
             }
         }
 
@@ -125,11 +171,14 @@ int main(int argc, char *argv[]) {
                     i--;
                 } else {
                     buffer[bytes_recv] = '\0'; // make eof
-                    printf("Message received: %s from %d\n", buffer, pfds[i].fd);
+                    printf("Message received: %s \nfrom %d\n", buffer, pfds[i].fd);
+                    char *ws_sec_key = ws_parse_websocket_http(buffer);
+                    // TODO: Use this websocket to append and base64 encode etc
+                    printf("websocket key: %s\n", ws_sec_key);
 
                     for (int j = 1; j < fd_count; j++) {
                         if (pfds[j].fd != pfds[i].fd) {
-                            send_http_response(pfds[j].fd, buffer);
+                            ws_send_http_response(pfds[j].fd, buffer);
                         }
                     }
                 }
