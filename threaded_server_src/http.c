@@ -31,15 +31,29 @@ char *receive_HTTP_request(int new_connection_fd) {
 
     int total_received = 0;
     int bytes_recv;
+    size_t body_len = 0;
+    bool header_read = false;
 
-    // recv(int fd, void *buf, size_t n, int flags)
     while ((bytes_recv = recv(new_connection_fd,
                               ptr_http_request_buffer + total_received,
                               BUFFER_SIZE - total_received, 0)) > 0) {
         total_received += bytes_recv;
 
-        if (strstr(ptr_http_request_buffer, "\r\n\r\n")) {
-            break;
+        char *end_of_headers = strstr(ptr_http_request_buffer, "\r\n\r\n");
+        if (end_of_headers != NULL) {
+            header_read = true;
+            char *result = strstr(ptr_http_request_buffer, "Content-Length: ");
+            if (result != NULL) {
+                body_len = atoi(result + 15);
+            }
+        }
+
+        if (header_read) {
+            size_t header_size = (end_of_headers + 4) - ptr_http_request_buffer;
+            size_t body_bytes = total_received - header_size;
+            if (body_bytes >= body_len) {
+                break;
+            }
         }
 
         if (total_received >= BUFFER_SIZE) {
@@ -61,7 +75,8 @@ char *receive_HTTP_request(int new_connection_fd) {
         return NULL;
     }
 
-    // printf("\nMessage Received: \n%s", ptr_http_request_buffer);
+    // printf("\nBytes Received: %d\nMessage Received: \n%s", total_received,
+    //        ptr_http_request_buffer);
     ptr_http_request_buffer[total_received] = '\0';
     return ptr_http_request_buffer;
 }
@@ -107,12 +122,10 @@ void ERROR_STATE_404(int new_connection_fd) {
     send_http_response(new_connection_fd, ptr_packet_buffer);
     return;
 }
-void HEADER_VALUE_STATE(char **ptr_ptr_http_client_buffer,
-                        int new_connection_fd, bool host_header_present,
-                        char *ptr_uri, char *ptr_method) {
+void HEADER_VALUE_STATE(http_request_ctx *ctx) {
     bool header_value_found = false;
     bool single_crlf_found = false;
-    char *buffer = *ptr_ptr_http_client_buffer;
+    char *buffer = *ctx->ptr_ptr_http_client_buffer;
     char header_value[256];
     size_t header_value_counter = 0;
     size_t start_pos = 0;
@@ -142,21 +155,20 @@ void HEADER_VALUE_STATE(char **ptr_ptr_http_client_buffer,
             if (buffer[start_pos] == '\r' && buffer[start_pos + 1] == '\n' &&
                 !single_crlf_found) {
                 single_crlf_found = true;
-                *ptr_ptr_http_client_buffer = &buffer[start_pos + 2];
+                *ctx->ptr_ptr_http_client_buffer = &buffer[start_pos + 2];
             }
         }
     }
 
     if (single_crlf_found) {
         // printf("\nHeader Value Extracted: %s\n", header_value);
-        HEADER_NAME_STATE(ptr_ptr_http_client_buffer, new_connection_fd,
-                          host_header_present, ptr_uri, ptr_method);
+        HEADER_NAME_STATE(ctx);
         return;
     } else {
         printf("\nerror at header value state");
-        ERROR_STATE_400(new_connection_fd);
-        free(ptr_method);
-        free(ptr_uri);
+        ERROR_STATE_400(ctx->new_connection_fd);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 }
@@ -345,76 +357,83 @@ void send_requested_HEAD_back(int new_connection_fd, char *ptr_uri_buffer) {
     }
 }
 
-void END_OF_HEADERS_STATE(int new_connection_fd, char *ptr_uri,
-                          char *ptr_method) {
+void parse_body_of_POST(http_request_ctx *ctx) {
+    char *ptr_body = *ctx->ptr_ptr_http_client_buffer;
+    char *ptr_body_content_type = ctx->ptr_body_content_type;
+    free(ptr_body_content_type);
+    return;
+}
 
-    // TODO: fix this memory bug here...
+void END_OF_HEADERS_STATE(http_request_ctx *ctx) {
 
-    char *processed_uri_ptr = ptr_uri;
-    if (!(strcmp(ptr_uri, "/") == 0)) {
+    char *processed_uri_ptr = ctx->ptr_uri;
+
+    if (!(strcmp(ctx->ptr_uri, "/") == 0)) {
         processed_uri_ptr += 1;
     }
-    // size_t processed_len = strlen(processed_uri_ptr);
-    // char uri_buffer[processed_len + 1];
+
     char *uri_buffer = strdup(processed_uri_ptr);
-    // strcpy(uri_buffer, processed_uri_ptr); // error is here
     char *ptr_uri_buffer = uri_buffer;
     FILE *file_ptr = fopen(uri_buffer, "r");
 
     if (file_ptr == NULL) {
         fprintf(stderr, "\t Can't open file : %s\n", ptr_uri_buffer);
-        ERROR_STATE_404(new_connection_fd);
-        close(new_connection_fd);
+        ERROR_STATE_404(ctx->new_connection_fd);
+        close(ctx->new_connection_fd);
         return;
     }
 
     struct stat sb;
     stat(uri_buffer, &sb);
-    // printf("\nURI at end of headers state: %s", uri_buffer);
 
     if (access(uri_buffer, F_OK) == 0 && !S_ISDIR(sb.st_mode) &&
-        strcmp(ptr_method, "GET") == 0) {
-        send_requested_file_back(new_connection_fd, ptr_uri_buffer);
+        strcmp(ctx->ptr_method, "GET") == 0) {
+        send_requested_file_back(ctx->new_connection_fd, ptr_uri_buffer);
         free(uri_buffer);
-        free(ptr_uri);
-        free(ptr_method);
+        free(ctx->ptr_uri);
+        free(ctx->ptr_method);
         fclose(file_ptr);
         return;
-    } else if (strcmp(ptr_method, "HEAD") == 0 &&
+    } else if (strcmp(ctx->ptr_method, "HEAD") == 0 &&
                access(uri_buffer, F_OK) == 0 && !S_ISDIR(sb.st_mode)) {
         // printf("\nhead request");
-        send_requested_HEAD_back(new_connection_fd, ptr_uri_buffer);
+        send_requested_HEAD_back(ctx->new_connection_fd, ptr_uri_buffer);
         free(uri_buffer);
-        free(ptr_uri);
-        free(ptr_method);
+        free(ctx->ptr_uri);
+        free(ctx->ptr_method);
+        return;
+    } else if (strcmp(ctx->ptr_method, "POST") == 0) {
+        printf("\nPOST Method detected!");
+        parse_body_of_POST(ctx);
+        free(uri_buffer);
+        free(ctx->ptr_uri);
+        free(ctx->ptr_method);
         return;
     } else {
         // printf("\nFile does not exist!");
-        ERROR_STATE_404(new_connection_fd);
+        ERROR_STATE_404(ctx->new_connection_fd);
         free(uri_buffer);
-        free(ptr_uri);
-        free(ptr_method);
+        free(ctx->ptr_uri);
+        free(ctx->ptr_method);
         return;
     }
 }
 
-void HEADER_NAME_STATE(char **ptr_ptr_http_client_buffer, int new_connection_fd,
-                       bool host_header_present, char *ptr_uri,
-                       char *ptr_method) {
+void HEADER_NAME_STATE(http_request_ctx *ctx) {
     // printf("\nreached header name state");
-    char *buffer = *ptr_ptr_http_client_buffer;
+    char *buffer = *ctx->ptr_ptr_http_client_buffer;
     char header_name[256];
     bool colon_found = false;
     bool single_crlf_found = false;
     size_t counter = 0;
     size_t buffer_len = strlen(buffer);
 
-    // printf("\n size of buffer: %d", buffer_len);
+    // printf("\n size of buffer: %ld", buffer_len);
     // extract the header name from the header field
     for (size_t i = 0; i < buffer_len; i++) {
         if (buffer[i] == ':') {
             colon_found = true;
-            *ptr_ptr_http_client_buffer = &buffer[i];
+            *ctx->ptr_ptr_http_client_buffer = &buffer[i];
             i = buffer_len;
         }
 
@@ -426,131 +445,147 @@ void HEADER_NAME_STATE(char **ptr_ptr_http_client_buffer, int new_connection_fd,
         }
 
         if (buffer_len == 2 && buffer[i] == '\r' && buffer[i + 1] == '\n') {
-            // printf("\ncrlf found at header name state!");
             single_crlf_found = true;
+            // no need to check buffer len = 2 if method is POST, as it has a
+            // body unlike HEAD and GET
+        } else if (strcmp(ctx->ptr_method, "POST") == 0 && buffer[i] == '\r' &&
+                   buffer[i + 1] == '\n') {
+            single_crlf_found = true;
+            *ctx->ptr_ptr_http_client_buffer = &buffer[i + 2];
         }
     }
 
-    // int len_header = strlen(header_name);
-    // printf("\nlen header: %d", len_header);
-
-    if (single_crlf_found && host_header_present) {
-        END_OF_HEADERS_STATE(new_connection_fd, ptr_uri, ptr_method);
+    if (single_crlf_found && ctx->host_header_present) {
+        // printf("\nReached end of headers state!");
+        END_OF_HEADERS_STATE(ctx);
         return;
     }
 
     if (colon_found) {
         // printf("\nHeader Name Extracted: %s", header_name);
         if (strcmp(header_name, "Host") == 0) {
-            host_header_present = true;
+            ctx->host_header_present = true;
         }
-        HEADER_VALUE_STATE(ptr_ptr_http_client_buffer, new_connection_fd,
-                           host_header_present, ptr_uri, ptr_method);
+        HEADER_VALUE_STATE(ctx);
         return;
     } else {
         printf("\nerror at header name state");
-        ERROR_STATE_400(new_connection_fd);
-        free(ptr_method);
-        free(ptr_uri);
+        ERROR_STATE_400(ctx->new_connection_fd);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 }
 
-void REQUEST_LINE_STATE(char **ptr_ptr_http_client_buffer,
-                        int new_connection_fd) {
-    char *buffer =
-        *ptr_ptr_http_client_buffer; // dereference the pointer pointer
-                                     // to get the actual char buffer
-    char *ptr_method = malloc(sizeof(char) * 8);
-    char *ptr_uri = malloc(sizeof(char) * 1025);
+void REQUEST_LINE_STATE(http_request_ctx *ctx) {
+    char *buffer = *ctx->ptr_ptr_http_client_buffer;
+
+    ctx->ptr_method = malloc(sizeof(char) * 8);
+    ctx->ptr_uri = malloc(sizeof(char) * 1025);
     char http_version[16];
-    bool host_header_present = false;
-    int result = sscanf(buffer, "%s %s %s", ptr_method, ptr_uri, http_version);
+    ctx->host_header_present = false;
+    int result =
+        sscanf(buffer, "%s %s %s", ctx->ptr_method, ctx->ptr_uri, http_version);
+
+    char *ptr_body_content_type;
+    char *start = strstr(buffer, "Content-Type: ");
+    char *end;
+    if (start != NULL) {
+        start += 14;
+        size_t pos = 0;
+        while (start[pos] != '\r') {
+            pos += 1;
+            end = &start[pos];
+        }
+        ptr_body_content_type = malloc(sizeof(char) * ((end - start) + 1));
+        strncpy(ptr_body_content_type, start, end - start);
+        ptr_body_content_type[end - start] = '\0';
+    }
+    ctx->ptr_body_content_type = ptr_body_content_type;
 
     char *crlf_ptr = strstr(buffer, http_version);
     if (crlf_ptr == NULL) {
-        ERROR_STATE_400(new_connection_fd);
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
     crlf_ptr += 8;
     if (result != 3) {
-        ERROR_STATE_400(new_connection_fd);
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 
-    if (!(strcmp(ptr_method, "GET") == 0 || strcmp(ptr_method, "POST") == 0 ||
-          strcmp(ptr_method, "HEAD") == 0)) {
-        ERROR_STATE_400(new_connection_fd);
+    if (!(strcmp(ctx->ptr_method, "GET") == 0 ||
+          strcmp(ctx->ptr_method, "POST") == 0 ||
+          strcmp(ctx->ptr_method, "HEAD") == 0)) {
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 
     if (strcmp(http_version, "HTTP/1.1") != 0) {
-        ERROR_STATE_400(new_connection_fd);
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 
     if (!(crlf_ptr[0] == '\r' && crlf_ptr[1] == '\n')) {
-        ERROR_STATE_400(new_connection_fd);
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 
-    size_t len_method = strlen(ptr_method);
-    size_t len_uri = strlen(ptr_uri);
-    ptr_uri[len_uri] = '\0';
-    ptr_method[len_method] = '\0';
+    size_t len_method = strlen(ctx->ptr_method);
+    size_t len_uri = strlen(ctx->ptr_uri);
+    ctx->ptr_uri[len_uri] = '\0';
+    ctx->ptr_method[len_method] = '\0';
 
     if (!(buffer[len_method - 1] != ' ' && buffer[len_method] == ' ' &&
           buffer[len_method + 1] == '/' &&
           buffer[len_method + len_uri + 1] == ' ' &&
           buffer[len_method + len_uri + 2] != ' ')) {
-        ERROR_STATE_400(new_connection_fd);
+        ERROR_STATE_400(ctx->new_connection_fd);
         printf("\nerror at request line state");
-        free(ptr_method);
-        free(ptr_uri);
+        free(ctx->ptr_method);
+        free(ctx->ptr_uri);
         return;
     }
 
     crlf_ptr += 2;
-    ptr_ptr_http_client_buffer = &crlf_ptr;
+    ctx->ptr_ptr_http_client_buffer = &crlf_ptr;
     //
     // printf("\nHTTP Method: %s", ptr_method);
     // printf("\nURI: %s", ptr_uri);
     // printf("\nHTTP Version: %s\n", http_version);
     //
-    HEADER_NAME_STATE(ptr_ptr_http_client_buffer, new_connection_fd,
-                      host_header_present, ptr_uri, ptr_method);
-    return;
-}
-
-void STATE_PARSER(char *ptr_http_client_buffer, int new_connection_fd) {
-    REQUEST_LINE_STATE(&ptr_http_client_buffer, new_connection_fd);
+    HEADER_NAME_STATE(ctx);
     return;
 }
 
 void parse_HTTP_requests(int new_connection_fd) {
+    http_request_ctx *ctx = malloc(sizeof(http_request_ctx));
     char *ptr_http_client_buffer = receive_HTTP_request(new_connection_fd);
     if (ptr_http_client_buffer == NULL) {
         free(ptr_http_client_buffer);
         return;
     }
 
-    STATE_PARSER(ptr_http_client_buffer, new_connection_fd);
+    ctx->new_connection_fd = new_connection_fd;
+    ctx->ptr_ptr_http_client_buffer = &ptr_http_client_buffer;
+    REQUEST_LINE_STATE(ctx);
 
+    free(ctx);
     free(ptr_http_client_buffer);
     return;
 }
