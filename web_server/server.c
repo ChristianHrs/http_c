@@ -85,6 +85,7 @@ ssize_t ws_recv_frame(int sock, char *out, size_t max_len) {
 }
 
 void ws_send_frame(int sock, const char *msg) {
+    printf("Sending %s to %d", msg, sock);
     size_t len = strlen(msg);
     unsigned char header[2] = {0x81, 0};
     if (len < 126) {
